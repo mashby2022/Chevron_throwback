@@ -1,0 +1,486 @@
+#!/usr/bin/env python
+# coding: utf-8
+
+# In[44]:
+
+
+get_ipython().run_line_magic('autosave', '60')
+import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
+import matplotlib.pyplot as plt
+import matplotlib 
+import numpy as np
+import seaborn as sns
+import os, glob
+import swifter 
+import scipy.signal as ss 
+from sklearn import preprocessing as pp
+from sklearn.decomposition import PCA
+from sklearn.model_selection import train_test_split
+from statsmodels.nonparametric.smoothers_lowess import lowess
+get_ipython().run_line_magic('matplotlib', 'inline')
+
+
+# In[45]:
+
+
+#clean notebook 
+#PREPROCESS --> ANALYSIS 
+#Y - value is SAND_DETECTOR 
+#ANAMOLY SCORE = raw data vs PCA prediction 
+#use PCA prediction for DEC 19 event 
+
+
+# In[46]:
+
+
+def make_lowess(series, frac=0, it=0, delta=0.0):
+    endog = series.values
+    exog = series.index
+    print('Smoothing..')
+    smooth = lowess(endog, exog, frac=frac, it=it, delta=delta)
+    print('Done Smoothing..')
+    index, data = np.transpose(smooth)
+   
+    return pd.Series(data, index=(pd.to_datetime(index).tz_localize('UTC').tz_convert('US/Central')))
+
+
+# In[47]:
+
+
+read_start = pd.to_datetime('2020-01-01T00:00:00')
+read_end = pd.to_datetime('2020-04-30T00:00:00')
+#pull_freq = "5s"
+
+ 
+
+# Read montly saved Data in Parguet File Format
+daterange_monthlystart_list = pd.date_range(read_start,read_end, freq='MS').strftime("%Y-%m-%d  %H:%M:%S.%f" ).tolist()
+daterange_monthlyend_list   = (pd.date_range(read_start,read_end, freq='M')+pd.offsets.DateOffset(days=1)).strftime("%Y-%m-%d  %H:%M:%S.%f" ).tolist()
+daterange_monthly_list = list(zip(daterange_monthlystart_list,daterange_monthlyend_list))
+
+ 
+
+for i in range(len(daterange_monthly_list)):
+    if (i==0):print("Read monthly starts: ","\t\t","monthly ends: ")   
+    print(daterange_monthlystart_list[i], "\t",daterange_monthlyend_list[i])
+
+
+# In[48]:
+
+
+get_ipython().run_cell_magic('time', '', '\n \n\ntables = []\nfor ps in (daterange_monthly_list):\n    print(\'\\nReading \' + ps[0][:7] + "_Sanding.parquet")\n    %time\n    table = pq.read_table("./Data/" + ps[0][:7] + "_Sanding.parquet",\n                          columns=None,\n                          #columns=all_signals[\'Name\'][~all_signals[\'Name\'].isin(excluded_columns)],\n                          use_pandas_metadata=True)\n    tables.append(table)\n    print(\'Done Reading...\')\nprint(\'\\nConcatenating Tables...\')\n%time my_data = pa.concat_tables(tables).to_pandas()\n#print(\'\\nExcluding specified columns (if any!)...\')\n#%time my_data = my_data.loc[:,~my_data.columns.isin(excluded_columns)]\nif any(my_data.index.duplicated()):\n    print(\'\\nRemoving rows with duplicate indeces..\\n\')\n\n #remove rows with duplicate indices after concatenating')
+
+
+# In[49]:
+
+
+get_ipython().run_line_magic('time', '')
+my_data = my_data.loc[~my_data.index.duplicated(keep='first')] #remove rows with duplicate indices after concatenating
+file_location ="./Data/"
+file_format =".parquet"
+
+
+# In[50]:
+
+
+for ps in (daterange_monthly_list):
+    period_daterange = pd.date_range(ps[0],ps[1],periods =5)
+
+
+# In[51]:
+
+
+exclude_from_preprocessing = ['PRODUCTION','CHOKE-STEP-POS']
+
+
+# In[52]:
+
+
+final_data = pd.DataFrame()
+for ps in (daterange_monthly_list):
+    file = file_location + ps[0][:7] +"_Sanding" + file_format
+    print('\nChecking file in the location ', file)
+    train_data = pd.DataFrame()
+    #for col in my_data: #col = feature 
+        #loop for deleting data around zeros 
+    for col in my_data.columns:
+        if col in (my_data.columns[~my_data.columns.isin(exclude_from_preprocessing)]):
+            print('\n',col,"is in the pre-processing list")
+            print('Preprocessing raw tag: ', col)
+            period_daterange = pd.date_range(ps[0],ps[1],periods =5)
+            monthly_data = []
+            #big_data = pd.DataFrame()
+            for x in range(len(period_daterange)-1):
+                print('Datetime from ',period_daterange[x],'to',period_daterange[x+1])
+                df = my_data.loc[period_daterange[x]:period_daterange[x+1]]
+                if any(df.index.duplicated()):
+                    print('\nRemoving rows with duplicate indeces..\n')
+                    df =df.loc[~df.index.duplicated(keep='first')] #remove rows with duplicate indices after concatenating
+                print('Downsampling to 5min')#downsampling 
+                df = df.resample('5min').asfreq()
+                print('Apply Smoothing')
+                df = make_lowess(df[col],frac = 0.3)
+                print('Upsampling back to 5s')
+                df = df.resample('5s').asfreq().interpolate(method='polynomial', order=3)
+                print('Taking the first derivative')
+                df = df.diff().fillna(method='ffill').fillna(method='bfill').div(5)
+                print('Appending monthly data')
+                monthly_data.append(df)
+                #monthly_data.astype
+            print("Concat monthly data")
+            big_data = pd.concat(monthly_data,axis = 0)
+            big_data.name = col
+        else:
+            print('\n',col,"is NOT in the pre-processing list")
+            print('Reading directly...')
+            big_data = my_data[col].loc[ps[0]:ps[1]]
+        print('Concat features')
+        train_data = pd.concat([train_data,big_data],axis = 1)     
+    print('Done')
+    final_data = pd.concat([final_data,train_data],axis = 0)
+
+
+
+# In[53]:
+
+
+get_ipython().run_cell_magic('time', '', '\n \ncondition = final_data[\'PRODUCTION\'].ne(final_data[\'PRODUCTION\'].shift().bfill())\nfinal_data["prev_index"] = final_data[\'PRODUCTION\'].shift().bfill()\n\n \n\nfunc_event_start = (lambda row: True if ((row.prev_index == 1.) and ((row[\'PRODUCTION\'] == 0.) or (row[\'PRODUCTION\'] > 100.)) ) else False)\nfunc_event_end   = (lambda row: True if ( ((row.prev_index == 0.) or (row.prev_index > 100.)) and (row[\'PRODUCTION\'] == 1.)) else False)\n\n \n\nprint("Identifying Event Starts..")\n%time event_start = final_data[final_data.swifter.apply(func_event_start, axis = 1)].index\nprint(event_start)\nprint("Identifying Event Ends..")\n%time event_end = final_data[final_data.swifter.apply(func_event_end, axis = 1)].index\nprint(event_end)\nprint("\\nLength of Event Starts ",len(event_start))\nprint("\\nLength of Event Ends ",len(event_end))\n\n \n\n\ndf= final_data.drop(columns=\'prev_index\')\n#17.8 #53.8')
+
+
+# In[14]:
+
+
+print('Number of Downtime Events = ',len(event_start))
+for event in range(len(event_start)):
+    print('\nEvent %s starts:  ' %(event+1),event_start[event])
+    print('\tends:\t ',event_end[event])
+    print('\tDuration ', event_end[event]-event_start[event])
+
+
+# In[15]:
+
+
+''''
+matplotlib.rcParams['figure.figsize'] = [24,12]
+
+ 
+
+mask_start = []; mask_end = []
+for event_ind in range(max(len(event_start),len(event_end))):
+    mask_start.append( (final_data.index < event_start[event_ind] - pd.Timedelta(hours = 12)) )
+    mask_end.append( (final_data.index > event_end[event_ind] + pd.Timedelta(hours = 24)) )
+
+ 
+
+axes = df.plot(subplots=True)
+for ax in axes:
+    for event_ind in range(len(event_start)):
+        ax.axvspan(final_data[mask_start[event_ind]].index[-1],df[mask_end[event_ind]].index[0],edgecolor='none', alpha=.1)
+plt.show()
+
+
+# In[66]:
+
+
+get_ipython().run_cell_magic('time', '', 'my_data_train =pd.DataFrame(); my_data_train_bad =pd.DataFrame()\nfor event_ind in range(len(event_start)):\n    #print(event_start[event_ind])\n    my_data_train_bad = my_data_train_bad.append( df[ (event_start[event_ind]- pd.Timedelta(hours = 12)) : (event_end[event_ind]+ pd.Timedelta(hours = 24)) ] )\n    #print( my_data[my_data.index(event_start[event_ind]):my_data.index(event_end[event_ind])] )\n    #my_data_train.append( my_data[my_data.index(event_start[event_ind]:event_end[event_ind])] )\n\n \n\n#print(my_data_train_bad)\nmy_data_train = df.loc[~df.index.isin(my_data_train_bad.index)]\n#print(my_data_train)')
+
+
+# In[55]:
+
+
+X = my_data_train
+
+
+# In[56]:
+
+
+pca = PCA(n_components=2)
+pca.fit(X)
+
+
+# In[57]:
+
+
+test_to_train_split = 0.1
+X_train, X_test, y_train, y_test =     train_test_split(X,X, test_size=test_to_train_split,                     random_state=None, stratify = None, shuffle = True)
+
+
+# In[58]:
+
+
+featuresToScale = X_train.columns
+sX = pp.StandardScaler(copy=True)
+X_train = pd.DataFrame(data=sX.fit_transform(X_train[featuresToScale]), index=X_train.index, columns=featuresToScale)
+X_test = pd.DataFrame(data=sX.transform(X_test[featuresToScale]), index=X_test.index, columns=featuresToScale)
+
+ 
+
+X_train = X_train.sort_index()
+X_test = X_test.sort_index()
+
+
+# In[59]:
+
+
+#PCA
+n_components = 2 #plot and compare raw data vs 2 components vs 3 components 
+                #run random forest model 
+                
+whiten = False
+random_state = None
+
+ 
+
+pca = PCA(n_components=n_components,svd_solver='full', whiten=whiten,           random_state=random_state)
+
+ 
+
+X_train_PCA = pca.fit_transform(X_train)
+X_train_PCA = pd.DataFrame(data=X_train_PCA, index=X_train.index)
+
+ 
+
+X_test_PCA = pca.transform(X_test)
+X_test_PCA = pd.DataFrame(data=X_test_PCA, index=X_test.index )
+
+ 
+
+X_train_PCA_inverse = pca.inverse_transform(X_train_PCA)
+X_train_PCA_inverse = pd.DataFrame(data=X_train_PCA_inverse,                                    index=X_train.index)
+
+ 
+
+X_test_PCA_inverse = pca.inverse_transform(X_test_PCA)
+X_test_PCA_inverse = pd.DataFrame(data=X_test_PCA_inverse,                                    index=X_test.index)
+
+
+# In[60]:
+
+
+print(X_train.shape,pca.fit_transform(X_train).shape)
+print(X_test.shape,pca.transform(X_test).shape)
+
+
+# In[61]:
+
+
+explained_variance = pca.explained_variance_ratio_
+print('explained variance => ', np.cumsum(np.round(explained_variance, decimals=4)*100))
+print('singular values    => ', pca.singular_values_)
+print('Average log-likelihood of the samples under the current model =>', pca.score(X_train))
+
+
+# In[112]:
+
+
+def anomalyScores_MAE(originalDF, reducedDF, predict = False):
+    loss = np.mean(np.abs(np.array(reducedDF)-np.array(originalDF)), axis=1)
+    loss = pd.Series(data=loss,index=originalDF.index)
+    if (predict):
+        
+        loss = loss
+    else:
+        clip_val = loss.quantile(q = 0.95)*3
+        print('clip value is ',clip_val)
+        
+        loss = loss
+    return loss
+
+
+# In[63]:
+
+
+anomalyScoresPCA_train=anomalyScores_MAE(X_train, X_train_PCA_inverse)
+anomalyScoresPCA_test=anomalyScores_MAE(X_test, X_test_PCA_inverse)
+
+
+# In[64]:
+
+
+MAE_clip_val1 = anomalyScoresPCA_train.quantile(q = 0.98)
+MAE_clip_val2 = anomalyScoresPCA_test.quantile(q = 0.98)
+print('MAE train clip value is', MAE_clip_val1)
+print('MAE test clip value is', MAE_clip_val2)
+
+ 
+
+print(np.mean(anomalyScoresPCA_train))
+
+ 
+
+MAE_dist1 = np.mean(anomalyScoresPCA_train.clip(upper=MAE_clip_val1)) * 3
+MAE_dist2 = np.mean(anomalyScoresPCA_test.clip(upper=MAE_clip_val2)) * 3
+print('\nMAE train threshold is', MAE_dist1)
+print('MAE test threshold is', MAE_dist2)
+
+ 
+
+threshold_MAE = MAE_dist1 * (1-test_to_train_split) + MAE_dist2 * test_to_train_split
+
+ 
+
+
+print('\nThreshold_MAE is ',threshold_MAE)
+
+bins = 300
+plt.figure(figsize=(24, 12))
+sns.distplot(anomalyScoresPCA_train.clip(upper=MAE_clip_val1),kde=True, bins=bins)
+sns.distplot(anomalyScoresPCA_test.clip(upper=MAE_clip_val2),kde=True, bins=bins)
+
+plt.legend(['Train', 'Test'])
+plt.xlim(left=0)
+plt.title("MAE distribution for anomaly detection for system: %s using model: %s" % ('Well PS002', 'PCA  '), fontsize = 20)
+
+
+# In[141]:
+
+
+dec_data = pd.read_parquet('2019-12_Sanding.parquet')
+dec_data = dec_data.loc[~dec_data.index.duplicated(keep='first')]
+dd= pd.DataFrame(dec_data)
+
+
+# In[142]:
+
+
+read_start = pd.to_datetime('2019-12-01T00:00:00')
+read_end = pd.to_datetime('2020-01-01T00:00:00')
+#pull_freq = "5s"
+
+ 
+
+# Read montly saved Data in Parguet File Format
+daterange_monthlystart_list = pd.date_range(read_start,read_end, freq='MS').strftime("%Y-%m-%d  %H:%M:%S.%f" ).tolist()
+daterange_monthlyend_list   = (pd.date_range(read_start,read_end, freq='M')+pd.offsets.DateOffset(days=1)).strftime("%Y-%m-%d  %H:%M:%S.%f" ).tolist()
+daterange_monthly_list = list(zip(daterange_monthlystart_list,daterange_monthlyend_list))
+
+ 
+
+for i in range(len(daterange_monthly_list)):
+    if (i==0):print("Read monthly starts: ","\t\t","monthly ends: ")   
+    print(daterange_monthlystart_list[i], "\t",daterange_monthlyend_list[i])
+
+
+# In[143]:
+
+
+tables = []
+for ps in (daterange_monthly_list):
+    print('\nReading ' + ps[0][:7] + "_Sanding.parquet")
+    get_ipython().run_line_magic('time', '')
+    table = pq.read_table("./Data/" + ps[0][:7] + "_Sanding.parquet",
+                          columns=None,
+                          #columns=all_signals['Name'][~all_signals['Name'].isin(excluded_columns)],
+                          use_pandas_metadata=True)
+    tables.append(table)
+    print('Done Reading...')
+print('\nConcatenating Tables...')
+get_ipython().run_line_magic('time', 'dec_data = pa.concat_tables(tables).to_pandas()')
+#print('\nExcluding specified columns (if any!)...')
+#%time my_data = my_data.loc[:,~my_data.columns.isin(excluded_columns)]
+if any(my_data.index.duplicated()):
+    print('\nRemoving rows with duplicate indeces..\n')
+
+ #remove rows with duplicate indices after concatenating
+
+
+# In[144]:
+
+
+for x in range(len(period_daterange)-1):
+    print('Datetime from ',period_daterange[x],'to',period_daterange[x+1])
+    dd = dec_data.loc[period_daterange[x]:period_daterange[x+1]]
+    print('Downsampling to 5min')#downsampling 
+    dd = dd.resample('5min').asfreq()
+    print('Apply Smoothing')
+    de = pd.DataFrame()
+    for i in dd.columns: 
+        de=pd.concat([de,make_lowess(dd[i], frac=0.3)],axis=1)
+    if any(de.index.duplicated()):
+        print('\nRemoving rows with duplicate indeces..\n')
+        de =de.loc[~de.index.duplicated(keep='first')]
+        print('Upsampling back to 5s')
+        df2 = de.resample('5s').asfreq().interpolate(method='polynomial', order=2)
+        print('Taking the first derivative')
+        df2.diff().fillna(method='ffill').fillna(method='bfill').div(5)
+
+
+# In[95]:
+
+
+
+
+
+# In[103]:
+
+
+X = df2
+
+
+# In[123]:
+
+
+featuresToScale = X.columns
+sX = pp.StandardScaler(copy=True)
+X = pd.DataFrame(data=sX.fit_transform(X_train[featuresToScale]), index=X.index, columns=featuresToScale)
+
+ 
+
+X = X.sort_index()
+
+
+# In[124]:
+
+
+pca = PCA(n_components=2)
+pca.fit(X)
+
+
+# In[128]:
+
+
+n_components = 2 
+                
+whiten = False
+random_state = None
+
+ 
+
+pca = PCA(n_components=n_components,svd_solver='full', whiten=whiten,           random_state=random_state)
+
+ 
+
+X_PCA = pca.fit_transform(X)
+X_PCA = pd.DataFrame(data=X_PCA, index=X.index)
+
+
+X_PCA_inverse = pca.inverse_transform(X_PCA)
+X_PCA_inverse = pd.DataFrame(data=X_PCA_inverse,                                    index=X.index)
+
+ 
+
+
+# In[129]:
+
+
+print(X.shape,pca.fit_transform(X).shape)
+
+
+# In[130]:
+
+
+anomalyScoresPCA=anomalyScores_MAE(X, X_PCA_inverse)
+
+
+# In[132]:
+
+
+scores = pd.DataFrame(index = X.index)
+scores['Threshold_MAE'] = threshold_MAE
+scores['Loss_MAE'] = anomalyScoresPCA
+scores.plot(logy=False, figsize = (24,8), grid='on', style='-') 
+
+
+# In[ ]:
